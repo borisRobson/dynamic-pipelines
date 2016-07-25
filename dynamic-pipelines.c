@@ -1,4 +1,3 @@
-
 #include <gst/gst.h>
 
 static gchar *opt_effects = NULL;
@@ -11,6 +10,8 @@ static GstElement *conv_before;
 static GstElement *conv_after;
 static GstElement *cur_effect;
 static GstElement *pipeline;
+static GstElement *fsink;
+static GstElement *q3;
 
 static GQueue effects = G_QUEUE_INIT;
 
@@ -89,14 +90,37 @@ pad_probe_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
   return GST_PAD_PROBE_OK;
 }
 
+gulong id;
+static GstPadProbeReturn newprobe_cb(GstPad *pad, GstPadProbeInfo *info, gpointer user_data){
+  //gst_pad_send_event(pad, gst_event_new_eos());
+}
+
+int count;
+gulong new_probe;
 static gboolean
 timeout_cb (gpointer user_data)
 {
+  
+  GstPad *pad;
+  
+  count++;
+  pad = gst_element_get_static_pad(q3, "sink");
+  if (count % 2 == 1){
+    
+    new_probe = gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BLOCK_UPSTREAM | GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM, newprobe_cb, user_data, NULL);  
+    g_print("adding new-probe: '%lu'\n", new_probe);
+
+  }else{
+    g_print("removing new-probe: '%lu'\n", new_probe);
+    gst_pad_remove_probe(pad, new_probe);
+  }
+
   gulong probe;
   probe = gst_pad_add_probe (blockpad, GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM,
       pad_probe_cb, user_data, NULL);
 
   g_print("adding probe: '%lu'\n", probe);
+
 
   return TRUE;
 }
@@ -144,8 +168,11 @@ main (int argc, char **argv)
   GOptionContext *ctx;
   GError *err = NULL;
   GMainLoop *loop;
-  GstElement *src, *q1, *q2, *effect, *filter1, *filter2, *sink;
+  GstElement *src, *q1, *q2, *effect, *filter1, *filter2, *sink, *tee;
   gchar **effect_names, **e;
+  GstPadTemplate *tee_src_pad_template;
+  GstPad *tee_video2_pad, *tee_video_pad;
+  GstPad *queue_video_pad, *queue_video2_pad;
 
   ctx = g_option_context_new ("");
   g_option_context_add_main_entries (ctx, options, NULL);
@@ -185,6 +212,7 @@ main (int argc, char **argv)
       "YVYU, Y444, v210, v216, NV12, NV21, UYVP, A420, YUV9, YVU9, IYU1 }");
 
   q1 = gst_element_factory_make ("queue", NULL);
+  q3 = gst_element_factory_make ("queue", NULL);
 
   blockpad = gst_element_get_static_pad (q1, "src");
 
@@ -203,12 +231,32 @@ main (int argc, char **argv)
       "format={ RGBx, BGRx, xRGB, xBGR, RGBA, BGRA, ARGB, ABGR, RGB, BGR }");
 
   sink = gst_element_factory_make ("ximagesink", NULL);
+  fsink = gst_element_factory_make ("ximagesink", NULL);
+
+  tee = gst_element_factory_make("tee", "t");
+  
 
   gst_bin_add_many (GST_BIN (pipeline), src, filter1, q1, conv_before, effect,
-      conv_after, q2, sink, NULL);
+      conv_after,tee, q2, q3, fsink, sink, NULL);
 
   gst_element_link_many (src, filter1, q1, conv_before, effect, conv_after,
-      q2, sink, NULL);
+      tee, NULL);
+  gst_element_link_many(q2, sink, NULL);
+  gst_element_link_many(q3, fsink, NULL);
+
+  tee_src_pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS (tee), "src_%u");
+  tee_video_pad = gst_element_request_pad(tee, tee_src_pad_template, NULL, NULL);
+  tee_video2_pad = gst_element_request_pad(tee, tee_src_pad_template, NULL, NULL);
+  g_print("recieved tee pads: '%s' , and '%s'\n", gst_pad_get_name(tee_video_pad), gst_pad_get_name(tee_video2_pad));
+  queue_video_pad = gst_element_get_static_pad(q2, "sink");
+  queue_video2_pad = gst_element_get_static_pad(q3, "sink");
+  g_print("recieved queue pads: '%s' , and '%s'\n", gst_pad_get_name(queue_video_pad), gst_pad_get_name(queue_video2_pad));
+  if(gst_pad_link(tee_video_pad, queue_video_pad) != GST_PAD_LINK_OK ||
+    gst_pad_link(tee_video2_pad, queue_video2_pad) != GST_PAD_LINK_OK){
+      g_printerr("could not link tee\n");
+      gst_object_unref(pipeline);
+      return -1;
+    }
 
   gst_element_set_state (pipeline, GST_STATE_PLAYING);
 
