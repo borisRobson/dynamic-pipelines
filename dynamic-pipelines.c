@@ -1,4 +1,5 @@
 #include <gst/gst.h>
+#include <stdio.h>
 
 static gchar *opt_effects = NULL;
 
@@ -99,19 +100,31 @@ int count;
 gulong new_probe;
 static gboolean
 timeout_cb (gpointer user_data)
-{
-  
+{  
+  char name[12];
+  GstPad *fsinkpad;
   GstPad *pad;
-  
+  GstStateChangeReturn ret;
+  GstState state;
   count++;
+  g_print("Count:%i\n",count)  ;
+  ret = gst_element_get_state(fsink, &state, NULL, GST_CLOCK_TIME_NONE);
+  g_print("State %s\n", gst_element_state_get_name(state));
+
+  
   pad = gst_element_get_static_pad(q3, "sink");
-  if (count % 2 == 1){
-    
+  if (count % 2 == 1){    
     new_probe = gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BLOCK_UPSTREAM | GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM, newprobe_cb, user_data, NULL);  
     g_print("adding new-probe: '%lu'\n", new_probe);
-
+    gst_element_set_state(fsink, GST_STATE_READY);      
+    gst_element_set_state(fsink, GST_STATE_NULL);
+    fsinkpad = gst_element_get_static_pad(fsink, "sink");
+    gst_pad_send_event(fsinkpad, gst_event_new_eos());
+    sprintf(name, "file%d.mp4", count);
+    g_object_set(fsink, "location", name, NULL);
   }else{
     g_print("removing new-probe: '%lu'\n", new_probe);
+    gst_element_set_state(fsink, GST_STATE_PLAYING);
     gst_pad_remove_probe(pad, new_probe);
   }
 
@@ -168,7 +181,7 @@ main (int argc, char **argv)
   GOptionContext *ctx;
   GError *err = NULL;
   GMainLoop *loop;
-  GstElement *src, *q1, *q2, *effect, *filter1, *filter2, *sink, *tee;
+  GstElement *src, *q1, *q2, *effect, *filter1, *filter2, *sink, *tee,*enc,*mux, *conv;
   gchar **effect_names, **e;
   GstPadTemplate *tee_src_pad_template;
   GstPad *tee_video2_pad, *tee_video_pad;
@@ -222,6 +235,7 @@ main (int argc, char **argv)
   cur_effect = effect;
 
   conv_after = gst_element_factory_make ("videoconvert", NULL);
+  conv = gst_element_factory_make ("videoconvert", NULL);
 
   q2 = gst_element_factory_make ("queue", NULL);
 
@@ -231,18 +245,24 @@ main (int argc, char **argv)
       "format={ RGBx, BGRx, xRGB, xBGR, RGBA, BGRA, ARGB, ABGR, RGB, BGR }");
 
   sink = gst_element_factory_make ("ximagesink", NULL);
-  fsink = gst_element_factory_make ("ximagesink", NULL);
+  //fsink = gst_element_factory_make ("ximagesink", NULL);
+  fsink = gst_element_factory_make ("filesink", NULL);
+//videoconvert ! avenc_mpeg4 ! mp4mux ! filesink location=file.mp4
+  g_object_set(fsink, "location", "first.mp4", NULL);
+
+  enc = gst_element_factory_make("avenc_mpeg4", "enc");
+  mux = gst_element_factory_make("mp4mux", "mux");
 
   tee = gst_element_factory_make("tee", "t");
   
 
   gst_bin_add_many (GST_BIN (pipeline), src, filter1, q1, conv_before, effect,
-      conv_after,tee, q2, q3, fsink, sink, NULL);
+      conv_after,tee, q2, sink,q3,conv,  enc, mux,fsink, NULL);
 
   gst_element_link_many (src, filter1, q1, conv_before, effect, conv_after,
       tee, NULL);
   gst_element_link_many(q2, sink, NULL);
-  gst_element_link_many(q3, fsink, NULL);
+  gst_element_link_many(q3,conv,enc, mux, fsink, NULL);
 
   tee_src_pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS (tee), "src_%u");
   tee_video_pad = gst_element_request_pad(tee, tee_src_pad_template, NULL, NULL);
