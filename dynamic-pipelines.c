@@ -13,141 +13,35 @@ static GstElement *cur_effect;
 static GstElement *pipeline;
 static GstElement *fsink;
 static GstElement *q3;
+static GstElement *depay;
+static GstElement *src;
+static GstElement *mcells;
+GstPad *tee_video2_pad, *tee_video_pad;
+GstPad *queue_video_pad, *queue_video2_pad;
+static void pad_added_handler(GstElement *el_src, GstPad *new_pad, gpointer user_data);
 
-static GQueue effects = G_QUEUE_INIT;
-
-static GstPadProbeReturn
-event_probe_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
-{
-  GMainLoop *loop = user_data;
-  GstElement *next;
-
-
-
-  if (GST_EVENT_TYPE (GST_PAD_PROBE_INFO_DATA (info)) != GST_EVENT_EOS)
-    return GST_PAD_PROBE_PASS;
-
-  g_print("removing event probe: '%lu' from object: '%s'\n", info->id, GST_OBJECT_NAME(pad));
-
-  gst_pad_remove_probe (pad, GST_PAD_PROBE_INFO_ID (info));
-
-  /* push current effect back into the queue */
-  g_queue_push_tail (&effects, gst_object_ref (cur_effect));
-  /* take next effect from the queue */
-  next = g_queue_pop_head (&effects);
-  if (next == NULL) {
-    GST_DEBUG_OBJECT (pad, "no more effects");
-    g_main_loop_quit (loop);
-    return GST_PAD_PROBE_DROP;
-  }
-
-  g_print ("Switching from '%s' to '%s'..\n", GST_OBJECT_NAME (cur_effect),
-      GST_OBJECT_NAME (next));
-
-  gst_element_set_state (cur_effect, GST_STATE_NULL);
-
-  /* remove unlinks automatically */
-  GST_DEBUG_OBJECT (pipeline, "removing %" GST_PTR_FORMAT, cur_effect);
-  gst_bin_remove (GST_BIN (pipeline), cur_effect);
-
-  GST_DEBUG_OBJECT (pipeline, "adding   %" GST_PTR_FORMAT, next);
-  gst_bin_add (GST_BIN (pipeline), next);
-
-  GST_DEBUG_OBJECT (pipeline, "linking..");
-  gst_element_link_many (conv_before, next, conv_after, NULL);
-
-  
-  gst_element_set_state (next, GST_STATE_PLAYING);
-
-  cur_effect = next;
-  GST_DEBUG_OBJECT (pipeline, "done");
-
-  return GST_PAD_PROBE_DROP;
-}
-
-static GstPadProbeReturn
-pad_probe_cb (GstPad * pad, GstPadProbeInfo * info, gpointer user_data)
-{
-  GstPad *srcpad, *sinkpad;  
-
-  GST_DEBUG_OBJECT (pad, "pad is blocked now");
-
-  /* remove the probe first */
-  g_print("removing probe: '%lu' from object: '%s'\n", info->id, GST_OBJECT_NAME(pad));
-  gst_pad_remove_probe (pad, GST_PAD_PROBE_INFO_ID (info));
-
-  /* install new probe for EOS */
-  srcpad = gst_element_get_static_pad (cur_effect, "src");
-  gst_pad_add_probe (srcpad, GST_PAD_PROBE_TYPE_BLOCK |
-      GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM, event_probe_cb, user_data, NULL);
-  gst_object_unref (srcpad);
-
-  /* push EOS into the element, the probe will be fired when the
-   * EOS leaves the effect and it has thus drained all of its data */
-  sinkpad = gst_element_get_static_pad (cur_effect, "sink");
-  gst_pad_send_event (sinkpad, gst_event_new_eos ());
-  gst_object_unref (sinkpad);
-
-  return GST_PAD_PROBE_OK;
-}
 
 gulong id;
+
 static GstPadProbeReturn newprobe_cb(GstPad *pad, GstPadProbeInfo *info, gpointer user_data){
-  //gst_pad_send_event(pad, gst_event_new_eos());
+  //gst_element_set_state(fsink, GST_STATE_NULL);
+  //return GST_PAD_PROBE_OK;  
 }
 
 int count;
 gulong new_probe;
-static gboolean
-timeout_cb (gpointer user_data)
-{  
-  char name[12];
-  GstPad *fsinkpad;
-  GstPad *pad;
-  GstStateChangeReturn ret;
-  GstState state;
-  count++;
-  g_print("Count:%i\n",count)  ;
-  ret = gst_element_get_state(fsink, &state, NULL, GST_CLOCK_TIME_NONE);
-  g_print("State %s\n", gst_element_state_get_name(state));
-
-  
-  pad = gst_element_get_static_pad(q3, "sink");
-  if (count % 2 == 1){    
-    new_probe = gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BLOCK_UPSTREAM | GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM, newprobe_cb, user_data, NULL);  
-    g_print("adding new-probe: '%lu'\n", new_probe);
-    gst_element_set_state(fsink, GST_STATE_READY);      
-    gst_element_set_state(fsink, GST_STATE_NULL);
-    fsinkpad = gst_element_get_static_pad(fsink, "sink");
-    gst_pad_send_event(fsinkpad, gst_event_new_eos());
-    sprintf(name, "file%d.mp4", count);
-    g_object_set(fsink, "location", name, NULL);
-  }else{
-    g_print("removing new-probe: '%lu'\n", new_probe);
-    gst_element_set_state(fsink, GST_STATE_PLAYING);
-    gst_pad_remove_probe(pad, new_probe);
-  }
-
-  gulong probe;
-  probe = gst_pad_add_probe (blockpad, GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM,
-      pad_probe_cb, user_data, NULL);
-
-  g_print("adding probe: '%lu'\n", probe);
-
-
-  return TRUE;
-}
 
 static gboolean
 bus_cb (GstBus * bus, GstMessage * msg, gpointer user_data)
 {
   GMainLoop *loop = user_data;
+  GstStateChangeReturn ret;
+  GstState pstate;
 
   switch (GST_MESSAGE_TYPE (msg)) {
     case GST_MESSAGE_ERROR:{
       GError *err = NULL;
       gchar *dbg;
-
       gst_message_parse_error (msg, &err, &dbg);
       gst_object_default_error (msg->src, err, dbg);
       g_clear_error (&err);
@@ -155,16 +49,36 @@ bus_cb (GstBus * bus, GstMessage * msg, gpointer user_data)
       g_main_loop_quit (loop);
       break;
     }
-    case GST_MESSAGE_STATE_CHANGED:{
-      //only want messages from the pipeline
-     // if(GST_MESSAGE_SRC(msg) == GST_OBJECT(pipeline)){
-        GstState old_state, pending_state, new_state;
-        gst_message_parse_state_changed(msg, &old_state, &new_state, &pending_state);
-        g_print("'%s' state changed from %s to %s. \n", GST_OBJECT_NAME(msg->src), gst_element_state_get_name(old_state), gst_element_state_get_name(new_state));
-    //  }
+    case GST_MESSAGE_STATE_CHANGED:{      
+      GstState old_state, pending_state, new_state;
+      gst_message_parse_state_changed(msg, &old_state, &new_state, &pending_state);              
+      if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(fsink)){        
+        g_print("'%s' state changed from %s to %s. \n", GST_OBJECT_NAME(msg->src), gst_element_state_get_name(old_state), gst_element_state_get_name(new_state)); 
+        if (new_state == GST_STATE_PLAYING && count == 0){
+          g_print("blocking fsink\n");
+          new_probe = gst_pad_add_probe(tee_video2_pad, GST_PAD_PROBE_TYPE_BLOCK_UPSTREAM | GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM, newprobe_cb, user_data, NULL);  
+        }
+      } else if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(pipeline)){
+        g_print("'%s' state changed from %s to %s. \n", GST_OBJECT_NAME(msg->src), gst_element_state_get_name(old_state), gst_element_state_get_name(new_state)); 
+      }
+      else if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(src)){
+        g_print("'%s' state changed from %s to %s. \n", GST_OBJECT_NAME(msg->src), gst_element_state_get_name(old_state), gst_element_state_get_name(new_state)); 
+      }          
       break;
     }
     default:
+      if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(mcells)) {
+          count++;          
+          if(count % 2 == 1){
+            g_print("Motion Detected\n");
+            g_print("removing new-probe: '%lu'\n", new_probe);        
+            gst_pad_remove_probe(tee_video2_pad, new_probe);
+          }else{
+            g_print("Motion Stopped\n");
+            new_probe = gst_pad_add_probe(tee_video2_pad, GST_PAD_PROBE_TYPE_BLOCK_UPSTREAM | GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM, newprobe_cb, user_data, NULL);  
+            g_print("adding new-probe: '%lu'\n", new_probe);            
+          }
+        }
       break;
   }
   return TRUE;
@@ -181,74 +95,42 @@ main (int argc, char **argv)
   GOptionContext *ctx;
   GError *err = NULL;
   GMainLoop *loop;
-  GstElement *src, *q1, *q2, *effect, *filter1, *filter2, *sink, *tee,*enc,*mux, *conv;
+  GstElement  *q1, *q2, *effect, *filter1, *filter2, *sink, *tee,*enc,*mux, *conv;
+  GstElement  *parse, *decode;
   gchar **effect_names, **e;
   GstPadTemplate *tee_src_pad_template;
-  GstPad *tee_video2_pad, *tee_video_pad;
-  GstPad *queue_video_pad, *queue_video2_pad;
+  
 
-  ctx = g_option_context_new ("");
-  g_option_context_add_main_entries (ctx, options, NULL);
-  g_option_context_add_group (ctx, gst_init_get_option_group ());
-  if (!g_option_context_parse (ctx, &argc, &argv, &err)) {
-    g_print ("Error initializing: %s\n", err->message);
-    g_clear_error (&err);
-    g_option_context_free (ctx);
-    return 1;
-  }
-  g_option_context_free (ctx);
-
-  if (opt_effects != NULL)
-    effect_names = g_strsplit (opt_effects, ",", -1);
-  else
-    effect_names = g_strsplit (DEFAULT_EFFECTS, ",", -1);
-
-  for (e = effect_names; e != NULL && *e != NULL; ++e) {
-    GstElement *el;
-
-    el = gst_element_factory_make (*e, NULL);
-    if (el) {
-      g_print ("Adding effect '%s'\n", *e);
-      g_queue_push_tail (&effects, el);
-    }
-  }
-
+  gst_init(&argc, &argv);
   pipeline = gst_pipeline_new ("pipeline");
-
-  src = gst_element_factory_make ("videotestsrc", NULL);
-  g_object_set (src, "is-live", TRUE, NULL);
-
-  filter1 = gst_element_factory_make ("capsfilter", NULL);
-  gst_util_set_object_arg (G_OBJECT (filter1), "caps",
-      "video/x-raw, width=320, height=240, "
-      "format={ I420, YV12, YUY2, UYVY, AYUV, Y41B, Y42B, "
-      "YVYU, Y444, v210, v216, NV12, NV21, UYVP, A420, YUV9, YVU9, IYU1 }");
 
   q1 = gst_element_factory_make ("queue", NULL);
   q3 = gst_element_factory_make ("queue", NULL);
-
+  mcells = gst_element_factory_make("motioncells", "mcells");
   blockpad = gst_element_get_static_pad (q1, "src");
 
   conv_before = gst_element_factory_make ("videoconvert", NULL);
-
-  effect = g_queue_pop_head (&effects);
-  cur_effect = effect;
-
   conv_after = gst_element_factory_make ("videoconvert", NULL);
+
+
   conv = gst_element_factory_make ("videoconvert", NULL);
 
   q2 = gst_element_factory_make ("queue", NULL);
 
-  filter2 = gst_element_factory_make ("capsfilter", NULL);
-  gst_util_set_object_arg (G_OBJECT (filter2), "caps",
-      "video/x-raw, width=320, height=240, "
-      "format={ RGBx, BGRx, xRGB, xBGR, RGBA, BGRA, ARGB, ABGR, RGB, BGR }");
+  src = gst_element_factory_make("rtspsrc", "src");
+  g_signal_connect(src, "pad-added", G_CALLBACK(pad_added_handler), loop);
+  g_object_set(src, "location", argv[1], NULL);
 
-  sink = gst_element_factory_make ("ximagesink", NULL);
-  //fsink = gst_element_factory_make ("ximagesink", NULL);
-  fsink = gst_element_factory_make ("filesink", NULL);
+  depay = gst_element_factory_make("rtph264depay", "depay");
+  parse = gst_element_factory_make("h264parse", "parse");
+  decode = gst_element_factory_make("avdec_h264", "decode");
+
+
+  sink = gst_element_factory_make ("xvimagesink", NULL);
+  fsink = gst_element_factory_make ("xvimagesink", NULL);
+  //fsink = gst_element_factory_make ("filesink", NULL);
 //videoconvert ! avenc_mpeg4 ! mp4mux ! filesink location=file.mp4
-  g_object_set(fsink, "location", "first.mp4", NULL);
+  //g_object_set(fsink, "location", "first.mp4", NULL);
 
   enc = gst_element_factory_make("avenc_mpeg4", "enc");
   mux = gst_element_factory_make("mp4mux", "mux");
@@ -256,13 +138,11 @@ main (int argc, char **argv)
   tee = gst_element_factory_make("tee", "t");
   
 
-  gst_bin_add_many (GST_BIN (pipeline), src, filter1, q1, conv_before, effect,
-      conv_after,tee, q2, sink,q3,conv,  enc, mux,fsink, NULL);
+  gst_bin_add_many (GST_BIN (pipeline), src, depay, parse, decode, q1, conv_before, mcells, conv_after, tee, q2, sink,q3,fsink, NULL);
 
-  gst_element_link_many (src, filter1, q1, conv_before, effect, conv_after,
-      tee, NULL);
+  gst_element_link_many (depay, parse, decode, q1,conv_before, mcells, conv_after, tee, NULL);
   gst_element_link_many(q2, sink, NULL);
-  gst_element_link_many(q3,conv,enc, mux, fsink, NULL);
+  gst_element_link_many(q3, fsink, NULL);
 
   tee_src_pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS (tee), "src_%u");
   tee_video_pad = gst_element_request_pad(tee, tee_src_pad_template, NULL, NULL);
@@ -284,7 +164,7 @@ main (int argc, char **argv)
 
   gst_bus_add_watch (GST_ELEMENT_BUS (pipeline), bus_cb, loop);
 
-  g_timeout_add_seconds (1, timeout_cb, loop);
+  //g_timeout_add_seconds (2, timeout_cb, loop);
 
   g_main_loop_run (loop);
 
@@ -292,4 +172,60 @@ main (int argc, char **argv)
   gst_object_unref (pipeline);
 
   return 0;
+}
+
+
+static void pad_added_handler(GstElement *el_src, GstPad *new_pad, gpointer user_data){
+  GstPadLinkReturn ret;
+  GMainLoop *loop = user_data;
+  GstEvent *event;
+  GstPad *depay_pad;
+  GstCaps *new_pad_caps = NULL;
+  GstStructure *new_pad_struct = NULL;
+  const gchar *new_pad_type = NULL;
+  GstCaps *filter = NULL;
+
+  g_print("Received new pad '%s' from '%s'\n", GST_PAD_NAME(new_pad), GST_ELEMENT_NAME(el_src));
+  //if pad already linked, nothing to do
+  if(gst_pad_is_linked(new_pad)){
+    g_print(" pad linked, ignoring...\n");
+    goto exit;
+  }
+
+  //get the correct depay pad
+  depay_pad =  gst_element_get_static_pad(depay, "sink");  
+
+  filter = gst_caps_from_string("application/x-rtp");
+  new_pad_caps = gst_pad_query_caps(new_pad, filter);
+
+  //send reconfigure event
+  event = gst_event_new_reconfigure();
+  gboolean event_sent = gst_pad_send_event(new_pad, event);
+
+  //check new pad type
+  new_pad_struct = gst_caps_get_structure(new_pad_caps,0);
+  new_pad_type = gst_structure_get_name(new_pad_struct);
+  if(!g_str_has_prefix(new_pad_type, "application/x-rtp")){
+    g_print(" Type: '%s', looking for rtp. Ignoring\n",new_pad_type);
+    goto exit;
+  }
+
+  //attempt to link
+  g_print("Attempting to link source pad '%s' to sink pad '%s'\n",GST_PAD_NAME(new_pad), GST_PAD_NAME(depay_pad));
+  ret = gst_pad_link(new_pad, depay_pad);
+  if(GST_PAD_LINK_FAILED(ret)){
+    g_print(" Type is: '%s' but link failed.\n", new_pad_type);
+  }else{
+    g_print(" Link Succeeded (type: '%s')\n", new_pad_type);
+    g_timeout_add_seconds (1, timeout_cb, loop);      
+    g_object_set(el_src, "latency", "0", NULL);
+  } 
+
+  exit:
+    //unref new pad caps if required
+    if(new_pad_caps != NULL){
+      gst_caps_unref(new_pad_caps);
+    }
+    //unref depay pad
+    gst_object_unref(depay_pad);    
 }
