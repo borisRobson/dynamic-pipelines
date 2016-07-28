@@ -1,35 +1,60 @@
 #include <gst/gst.h>
 #include <stdio.h>
 
-static gchar *opt_effects = NULL;
 
-#define DEFAULT_EFFECTS "identity,exclusion,navigationtest," \
-    "agingtv,videoflip,vertigotv,gaussianblur,shagadelictv,edgetv"
-
-static GstPad *blockpad;
 static GstElement *conv_before;
 static GstElement *conv_after;
-static GstElement *cur_effect;
+
 static GstElement *pipeline;
 static GstElement *fsink;
 static GstElement *q3;
 static GstElement *depay;
 static GstElement *src;
 static GstElement *mcells;
+static GstElement *curr_sink;
+static GstElement *mux;
+static GstElement *enc;
+
 GstPad *tee_video2_pad, *tee_video_pad;
 GstPad *queue_video_pad, *queue_video2_pad;
+
+
 static void pad_added_handler(GstElement *el_src, GstPad *new_pad, gpointer user_data);
 
+gulong queue_probe;
+int count;
 
-gulong id;
+static GstPadProbeReturn queue_data_probe_cb(GstPad *pad, GstPadProbeInfo *info, gpointer user_data){
+  
+  GstPad *qsrc, *sinkpad;
+  GstEvent *event;
+  GstPad *qpad, *fsinkpad, *encpad, *muxpad;
+  GstStateChangeReturn ret;
+  GstState state, old_state;
+  gsize size;
+  GstBuffer *buffer;
 
-static GstPadProbeReturn newprobe_cb(GstPad *pad, GstPadProbeInfo *info, gpointer user_data){
-  //gst_element_set_state(fsink, GST_STATE_NULL);
-  //return GST_PAD_PROBE_OK;  
+  //get buffer size (DEBUG)
+  /*buffer = (GST_PAD_PROBE_INFO_BUFFER(info));
+  size = gst_buffer_get_size(buffer);
+  g_print("blocked buffer of size: %lu\n", size);*/
+
+  ret = gst_element_get_state(curr_sink, &state, NULL, GST_CLOCK_TIME_NONE);
+  qpad = gst_element_get_static_pad(q3, "sink");
+
+  if(state == GST_STATE_PLAYING){
+    g_print("getting sinkpad\n");    
+    muxpad = gst_element_get_static_pad(mux, "video_0");    
+    //send eos to elements about to be removed
+    gst_pad_send_event(muxpad, gst_event_new_eos());        
+    gst_element_set_state(curr_sink, GST_STATE_READY);    
+    gst_element_set_state(curr_sink, GST_STATE_NULL);
+    gst_element_set_state(mux, GST_STATE_NULL);
+  }  
+  //drop data
+  return GST_PAD_PROBE_DROP;
 }
 
-int count;
-gulong new_probe;
 
 static gboolean
 bus_cb (GstBus * bus, GstMessage * msg, gpointer user_data)
@@ -37,9 +62,15 @@ bus_cb (GstBus * bus, GstMessage * msg, gpointer user_data)
   GMainLoop *loop = user_data;
   GstStateChangeReturn ret;
   GstState pstate;
-
+  GstPad *qpad, *sinkpad, *muxpad, *qsink;
+  char name[12];
+  GstElement *newsink;
+  qpad = gst_element_get_static_pad(q3, "src");
+  qsink = gst_element_get_static_pad(q3, "sink");
+  //parse bus messages
   switch (GST_MESSAGE_TYPE (msg)) {
     case GST_MESSAGE_ERROR:{
+      //quit on error
       GError *err = NULL;
       gchar *dbg;
       gst_message_parse_error (msg, &err, &dbg);
@@ -51,34 +82,68 @@ bus_cb (GstBus * bus, GstMessage * msg, gpointer user_data)
     }
     case GST_MESSAGE_STATE_CHANGED:{      
       GstState old_state, pending_state, new_state;
-      gst_message_parse_state_changed(msg, &old_state, &new_state, &pending_state);              
-      if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(fsink)){        
+      gst_message_parse_state_changed(msg, &old_state, &new_state, &pending_state);                      
+      if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(curr_sink)){        
         g_print("'%s' state changed from %s to %s. \n", GST_OBJECT_NAME(msg->src), gst_element_state_get_name(old_state), gst_element_state_get_name(new_state)); 
+        //block data flow as soon as it is ready, this starts it in idle state
         if (new_state == GST_STATE_PLAYING && count == 0){
           g_print("blocking fsink\n");
-          new_probe = gst_pad_add_probe(tee_video2_pad, GST_PAD_PROBE_TYPE_BLOCK_UPSTREAM | GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM, newprobe_cb, user_data, NULL);  
+          queue_probe = gst_pad_add_probe(qpad, GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM, queue_data_probe_cb, user_data, NULL);                                            
         }
       } else if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(pipeline)){
+        //show all pipeline messages
         g_print("'%s' state changed from %s to %s. \n", GST_OBJECT_NAME(msg->src), gst_element_state_get_name(old_state), gst_element_state_get_name(new_state)); 
       }
       else if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(src)){
+        //show src messages
         g_print("'%s' state changed from %s to %s. \n", GST_OBJECT_NAME(msg->src), gst_element_state_get_name(old_state), gst_element_state_get_name(new_state)); 
       }          
+      else if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(mux)){
+        //show src messages
+        g_print("'%s' state changed from %s to %s. \n", GST_OBJECT_NAME(msg->src), gst_element_state_get_name(old_state), gst_element_state_get_name(new_state)); 
+      }   
       break;
     }
     default:
       if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(mcells)) {
-          count++;          
-          if(count % 2 == 1){
-            g_print("Motion Detected\n");
-            g_print("removing new-probe: '%lu'\n", new_probe);        
-            gst_pad_remove_probe(tee_video2_pad, new_probe);
-          }else{
-            g_print("Motion Stopped\n");
-            new_probe = gst_pad_add_probe(tee_video2_pad, GST_PAD_PROBE_TYPE_BLOCK_UPSTREAM | GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM, newprobe_cb, user_data, NULL);  
-            g_print("adding new-probe: '%lu'\n", new_probe);            
+        /*
+          parse motioncells messages
+          messages sent on motion detected and motion stopped
+        */
+        count++;   
+        if(count % 2 == 1 && queue_probe !=0){
+          //motin detected, remove probe to allow data flow
+          g_print("Motion Detected\n");
+          g_print("removing probe: '%lu'\n", queue_probe);    
+          gst_pad_remove_probe(qpad, queue_probe);
+          //create and set filename
+          gst_bin_remove(GST_BIN(pipeline), curr_sink);
+          gst_bin_remove(GST_BIN(pipeline), mux);
+          sprintf(name, "file%d.mp4", (count)) ;
+          mux = gst_element_factory_make("mp4mux", NULL);
+          curr_sink = gst_element_factory_make("filesink", NULL);
+          g_object_set(curr_sink, "location", name, NULL);
+          //add new source to pipeline
+          gst_bin_add_many(GST_BIN(pipeline), mux, curr_sink,NULL);
+
+          g_print("Attempting link\n");
+          //link and set to play
+          if(!gst_element_link_many(enc, mux, curr_sink,NULL)){
+            g_printerr("could not relink mux\n");
+            g_main_loop_quit (loop);
+            break;
           }
+
+          gst_element_set_state(mux, GST_STATE_PLAYING);  
+          gst_element_set_state(curr_sink, GST_STATE_PLAYING);            
+        }else{
+          //motion stopped, bock data flow
+          g_print("Motion Stopped\n");        
+          sinkpad = gst_element_get_static_pad(q3, "sink");
+          queue_probe = gst_pad_add_probe(qpad, GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM, queue_data_probe_cb, user_data, NULL);  
+          g_print("adding new-probe: '%lu'\n", queue_probe);            
         }
+      }
       break;
   }
   return TRUE;
@@ -87,37 +152,34 @@ bus_cb (GstBus * bus, GstMessage * msg, gpointer user_data)
 int
 main (int argc, char **argv)
 {
-  GOptionEntry options[] = {
-    {"effects", 'e', 0, G_OPTION_ARG_STRING, &opt_effects,
-        "Effects to use (comma-separated list of element names)", NULL},
-    {NULL}
-  };
-  GOptionContext *ctx;
-  GError *err = NULL;
   GMainLoop *loop;
-  GstElement  *q1, *q2, *effect, *filter1, *filter2, *sink, *tee,*enc,*mux, *conv;
+  GstElement  *q1, *q2, *sink, *tee;
   GstElement  *parse, *decode;
-  gchar **effect_names, **e;
-  GstPadTemplate *tee_src_pad_template;
-  
+  GstPadTemplate *tee_src_pad_template, *mux_src_template;  
+  GstPad *sinkpad, *encpad, *muxpad; 
+  GstCaps *filtercaps, *vidcaps;
+  GstElement *filter, *filter1;
 
   gst_init(&argc, &argv);
+
+  //create elements 
   pipeline = gst_pipeline_new ("pipeline");
 
-  q1 = gst_element_factory_make ("queue", NULL);
-  q3 = gst_element_factory_make ("queue", NULL);
+  q1 = gst_element_factory_make ("queue", "q1");
+  q2 = gst_element_factory_make ("queue", "q2");
+  q3 = gst_element_factory_make ("queue", "q3");
+  g_object_set(q3, "flush-on-eos", TRUE,"max-size-buffers", "0", "max-size-bytes", "0", NULL);
   mcells = gst_element_factory_make("motioncells", "mcells");
-  blockpad = gst_element_get_static_pad (q1, "src");
-
+  
   conv_before = gst_element_factory_make ("videoconvert", NULL);
   conv_after = gst_element_factory_make ("videoconvert", NULL);
-
-
-  conv = gst_element_factory_make ("videoconvert", NULL);
-
-  q2 = gst_element_factory_make ("queue", NULL);
+  
 
   src = gst_element_factory_make("rtspsrc", "src");
+  /*
+    rtspsrc cannot be directly linked. this callback will negotiate pad caps 
+    and create link
+  */
   g_signal_connect(src, "pad-added", G_CALLBACK(pad_added_handler), loop);
   g_object_set(src, "location", argv[1], NULL);
 
@@ -125,25 +187,50 @@ main (int argc, char **argv)
   parse = gst_element_factory_make("h264parse", "parse");
   decode = gst_element_factory_make("avdec_h264", "decode");
 
-
+  filter = gst_element_factory_make("capsfilter", NULL);
+  gst_util_set_object_arg (G_OBJECT (filter), "caps",
+    "video/x-raw,format=I420, framerate, GST_TYPE_FRACTION,10,1");
+  
   sink = gst_element_factory_make ("xvimagesink", NULL);
-  fsink = gst_element_factory_make ("xvimagesink", NULL);
-  //fsink = gst_element_factory_make ("filesink", NULL);
-//videoconvert ! avenc_mpeg4 ! mp4mux ! filesink location=file.mp4
-  //g_object_set(fsink, "location", "first.mp4", NULL);
+
+  fsink = gst_element_factory_make ("fakesink", NULL);
+
+  curr_sink = fsink;
 
   enc = gst_element_factory_make("avenc_mpeg4", "enc");
+
   mux = gst_element_factory_make("mp4mux", "mux");
 
   tee = gst_element_factory_make("tee", "t");
   
+  sinkpad = gst_element_get_static_pad(fsink, "sink");  
 
-  gst_bin_add_many (GST_BIN (pipeline), src, depay, parse, decode, q1, conv_before, mcells, conv_after, tee, q2, sink,q3,fsink, NULL);
+  gst_bin_add_many (GST_BIN (pipeline), src, depay, parse, decode, q1, conv_before, mcells, conv_after, tee, q2, sink,q3,filter, enc, mux,fsink, NULL);
 
-  gst_element_link_many (depay, parse, decode, q1,conv_before, mcells, conv_after, tee, NULL);
-  gst_element_link_many(q2, sink, NULL);
-  gst_element_link_many(q3, fsink, NULL);
+  //link all but source
+  //main branch
+  gst_element_link_many (depay, parse, decode, q1, tee,NULL);
 
+  //tee0
+  gst_element_link_many(q2,  conv_before, mcells, conv_after, sink, NULL);
+
+  //tee1
+  gst_element_link_many(q3,filter, enc, NULL);
+
+  //Get enc -> mux pad and link
+  mux_src_template = gst_element_class_get_pad_template(GST_ELEMENT_GET_CLASS(mux), "video_%u");
+  muxpad = gst_element_request_pad(mux, mux_src_template, NULL, NULL);
+  g_print("recieved mux pad '%s'\n", gst_pad_get_name(muxpad));
+  encpad = gst_element_get_static_pad(enc, "src");
+  if(gst_pad_link(encpad, muxpad) != GST_PAD_LINK_OK){
+    g_printerr("could not link mux\n");
+    gst_object_unref(pipeline);
+    return -1;
+  }else{    
+    gst_element_link(mux, curr_sink);
+  }
+
+  //Get tee -> queue pads and link
   tee_src_pad_template = gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS (tee), "src_%u");
   tee_video_pad = gst_element_request_pad(tee, tee_src_pad_template, NULL, NULL);
   tee_video2_pad = gst_element_request_pad(tee, tee_src_pad_template, NULL, NULL);
@@ -158,13 +245,12 @@ main (int argc, char **argv)
       return -1;
     }
 
+  //start playing
   gst_element_set_state (pipeline, GST_STATE_PLAYING);
 
   loop = g_main_loop_new (NULL, FALSE);
 
   gst_bus_add_watch (GST_ELEMENT_BUS (pipeline), bus_cb, loop);
-
-  //g_timeout_add_seconds (2, timeout_cb, loop);
 
   g_main_loop_run (loop);
 
@@ -179,11 +265,13 @@ static void pad_added_handler(GstElement *el_src, GstPad *new_pad, gpointer user
   GstPadLinkReturn ret;
   GMainLoop *loop = user_data;
   GstEvent *event;
-  GstPad *depay_pad;
+  GstPad *depay_pad, *qpad;
   GstCaps *new_pad_caps = NULL;
   GstStructure *new_pad_struct = NULL;
   const gchar *new_pad_type = NULL;
   GstCaps *filter = NULL;
+
+  qpad = gst_element_get_static_pad(q3, "sink");
 
   g_print("Received new pad '%s' from '%s'\n", GST_PAD_NAME(new_pad), GST_ELEMENT_NAME(el_src));
   //if pad already linked, nothing to do
@@ -216,9 +304,9 @@ static void pad_added_handler(GstElement *el_src, GstPad *new_pad, gpointer user
   if(GST_PAD_LINK_FAILED(ret)){
     g_print(" Type is: '%s' but link failed.\n", new_pad_type);
   }else{
-    g_print(" Link Succeeded (type: '%s')\n", new_pad_type);
-    g_timeout_add_seconds (1, timeout_cb, loop);      
-    g_object_set(el_src, "latency", "0", NULL);
+    g_print(" Link Succeeded (type: '%s')\n", new_pad_type); 
+    g_object_set(src, "latency", "0", NULL);   
+    //gst_bus_add_watch (GST_ELEMENT_BUS (pipeline), bus_cb, user_data);    
   } 
 
   exit:
