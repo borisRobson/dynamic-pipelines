@@ -41,7 +41,7 @@ static GstPadProbeReturn queue_data_probe_cb(GstPad *pad, GstPadProbeInfo *info,
   return GST_PAD_PROBE_DROP;
 }
 
-static gboolean bus_cb (GstBus * bus, GstMessage * msg, gpointer user_data)
+static gboolean bus_cb (GstBus *bus, GstMessage *msg, gpointer user_data)
 {
   GMainLoop *loop = user_data;  
   GstPad *qpad;
@@ -66,12 +66,7 @@ static gboolean bus_cb (GstBus * bus, GstMessage * msg, gpointer user_data)
       GstState old_state, pending_state, new_state;
       gst_message_parse_state_changed(msg, &old_state, &new_state, &pending_state);                      
       if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(curr_sink)){        
-        g_print("'%s' state changed from %s to %s. \n", GST_OBJECT_NAME(msg->src), gst_element_state_get_name(old_state), gst_element_state_get_name(new_state)); 
-        //block data flow as soon as it is ready, this starts it in idle state
-        /*if (new_state == GST_STATE_PLAYING && count == 0){
-          g_print("blocking fsink\n");            
-          queue_probe = gst_pad_add_probe(qpad, GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM, queue_data_probe_cb, user_data, NULL);                                                   
-        }*/
+        g_print("'%s' state changed from %s to %s. \n", GST_OBJECT_NAME(msg->src), gst_element_state_get_name(old_state), gst_element_state_get_name(new_state));        
       } 
       else if(GST_OBJECT_NAME(msg->src) == GST_OBJECT_NAME(pipeline)){
         //show  pipeline messages
